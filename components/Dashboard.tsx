@@ -105,6 +105,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [apiNotice, setApiNotice] = useState<string | null>(null);
   const [pendingRetry, setPendingRetry] = useState<(() => Promise<void>) | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -226,7 +227,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
         throw new Error(errorData.error || `Server responded with status ${response.status}`);
       }
 
-      const { reply, modelUsed } = await response.json();
+      const { reply, modelUsed, notice } = await response.json();
+      if (notice) {
+        setApiNotice(notice);
+      }
 
       const assistantMessage: ChatMessage = {
         id: createMessageId('msg-gemini'),
@@ -298,11 +302,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
       setInputText('');
     } catch (err: unknown) {
       console.error('Submission failed:', err);
-      const msg = err instanceof Error ? err.message : String(err);
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const cleanMsg = rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('API key not valid')
+        ? 'The configured GEMINI_API_KEY is invalid. Please verify GEMINI_API_KEY in the AI Studio Settings > Secrets panel.'
+        : rawMsg;
       setErrorMessage(
-        msg.includes('Firestore Error')
+        cleanMsg.includes('Firestore Error')
           ? 'Failed to save to Firestore. Your draft has been preserved. Please click "Retry Save".'
-          : `Failed to process reflection: ${msg}. Your draft is safely preserved below.`
+          : `Failed to process reflection: ${cleanMsg}. Your draft is safely preserved below.`
       );
     } finally {
       setIsSubmitting(false);
@@ -329,7 +336,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
         throw new Error(errorData.error || 'Failed to synthesize summary');
       }
 
-      const { summary } = await response.json();
+      const { summary, notice } = await response.json();
+      if (notice) {
+        setApiNotice(notice);
+      }
 
       // Persist summary to Firestore
       const docPath = `users/${user.uid}/interactions/${activeInteraction.id}`;
@@ -632,6 +642,29 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
                   <span>Retry Save</span>
                 </button>
               )}
+            </div>
+          )}
+
+          {/* Informational API Notice Banner */}
+          {apiNotice && (
+            <div
+              id="api-notice-banner"
+              className="mx-4 sm:mx-6 mt-3 p-3 rounded-xl bg-stone-100 border border-stone-200 text-stone-700 text-xs flex items-start justify-between shadow-xs"
+            >
+              <div className="flex items-start space-x-2.5">
+                <Sparkles className="w-4 h-4 text-stone-600 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-stone-900">Engine Notice:</span> {apiNotice}
+                </div>
+              </div>
+              <button
+                id="btn-dismiss-notice"
+                onClick={() => setApiNotice(null)}
+                className="ml-3 p-0.5 text-stone-400 hover:text-stone-700 text-xs cursor-pointer"
+                title="Dismiss"
+              >
+                ✕
+              </button>
             </div>
           )}
 

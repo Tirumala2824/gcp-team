@@ -81,11 +81,14 @@ export async function POST(req: NextRequest) {
         systemInstruction,
         temperature: 0.7,
       },
+      mode,
     });
 
     return NextResponse.json({
       reply: result.text,
       modelUsed: result.modelUsed,
+      isFallback: result.isFallback ?? false,
+      notice: result.notice,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown server error';
