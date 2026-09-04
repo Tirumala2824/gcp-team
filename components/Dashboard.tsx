@@ -303,12 +303,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
     } catch (err: unknown) {
       console.error('Submission failed:', err);
       const rawMsg = err instanceof Error ? err.message : String(err);
-      const cleanMsg = rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('API key not valid')
-        ? 'The configured GEMINI_API_KEY is invalid. Please verify GEMINI_API_KEY in the AI Studio Settings > Secrets panel.'
-        : rawMsg;
+      let cleanMsg = rawMsg;
+      let isFirestore = false;
+      try {
+        const parsed = JSON.parse(rawMsg);
+        if (parsed && typeof parsed === 'object') {
+          if (parsed.error && parsed.operationType) {
+            isFirestore = true;
+            cleanMsg = `Database operation (${parsed.operationType}) encountered: ${parsed.error}`;
+          } else if (parsed.error) {
+            cleanMsg = String(parsed.error);
+          }
+        }
+      } catch {
+        // rawMsg is plain string
+      }
+      if (cleanMsg.includes('API_KEY_INVALID') || cleanMsg.includes('API key not valid')) {
+        cleanMsg = 'The configured GEMINI_API_KEY is invalid. Please verify GEMINI_API_KEY in the AI Studio Settings > Secrets panel.';
+      }
       setErrorMessage(
-        cleanMsg.includes('Firestore Error')
-          ? 'Failed to save to Firestore. Your draft has been preserved. Please click "Retry Save".'
+        isFirestore
+          ? `${cleanMsg}. Your reflection draft is safely preserved below. Click "Retry Save" to retry persistence.`
           : `Failed to process reflection: ${cleanMsg}. Your draft is safely preserved below.`
       );
     } finally {

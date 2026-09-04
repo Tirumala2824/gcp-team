@@ -32,6 +32,7 @@ service cloud.firestore {
         && data.title is string && data.title.size() > 0 && data.title.size() <= 200
         && data.mode is string && data.mode in ['reflection', 'brainstorm', 'summary', 'journal']
         && data.messages is list && data.messages.size() <= 100
+        && (!('id' in data) || (data.id is string && isValidId(data.id)))
         && (!('summary' in data) || (data.summary is string && data.summary.size() <= 5000));
     }
 
