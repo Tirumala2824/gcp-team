@@ -16,6 +16,7 @@ export async function POST(req: NextRequest) {
     const data = rawBody && typeof rawBody === 'object' ? (rawBody as Record<string, unknown>) : {};
     const messages = Array.isArray(data.messages) ? data.messages : [];
     const textSnippet = typeof data.text === 'string' ? data.text : '';
+    const region = typeof data.region === 'string' ? data.region.trim() : (process.env.GEMINI_REGION || 'us-central1');
 
     let contentToSummarize = textSnippet.trim();
 
@@ -54,6 +55,7 @@ export async function POST(req: NextRequest) {
         temperature: 0.5,
       },
       mode: 'summary',
+      region,
     });
 
     return NextResponse.json({
@@ -61,6 +63,7 @@ export async function POST(req: NextRequest) {
       modelUsed: result.modelUsed,
       isFallback: result.isFallback ?? false,
       notice: result.notice,
+      region: result.region || region,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown server error';

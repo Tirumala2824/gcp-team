@@ -1,25 +1,75 @@
 import { GoogleGenAI, GenerateContentParameters, GenerateContentResponse } from '@google/genai';
+import { RegionOption } from './types';
+
+/**
+ * Supported Google Cloud and Gemini regions
+ */
+export const SUPPORTED_REGIONS: RegionOption[] = [
+  {
+    id: 'us-central1',
+    name: 'US Central (Iowa)',
+    description: 'Primary Google Cloud region for Gemini with highest quota and model availability',
+    recommended: true,
+  },
+  {
+    id: 'us-east4',
+    name: 'US East (N. Virginia)',
+    description: 'Alternative US regional cluster with high throughput',
+  },
+  {
+    id: 'europe-west1',
+    name: 'Europe West (Belgium)',
+    description: 'European multi-cluster deployment with EU compliance',
+  },
+  {
+    id: 'asia-southeast1',
+    name: 'Asia Southeast (Singapore)',
+    description: 'Asia-Pacific regional edge deployment',
+  },
+];
 
 /**
  * Resilient Model Fallback Ladder ordered by availability and latency
  */
 export const MODEL_FALLBACK_LADDER = [
+  'gemini-3.8-flash',
   'gemini-3.6-flash',
   'gemini-3.1-flash-lite',
   'gemini-flash-latest',
-  'gemini-3.8-flash',
   'gemini-3.7-flash',
 ] as const;
 
 let aiClientInstance: GoogleGenAI | null = null;
+let currentClientRegion: string | null = null;
 
-export function getGeminiClient(): GoogleGenAI | null {
+export function getGeminiClient(region?: string): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
+  const targetRegion = region || process.env.GEMINI_REGION || 'us-central1';
+
+  // If using Vertex AI mode with GCP project credentials
+  if (process.env.GEMINI_USE_VERTEX === 'true' && (process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT)) {
+    if (!aiClientInstance || currentClientRegion !== targetRegion) {
+      currentClientRegion = targetRegion;
+      aiClientInstance = new GoogleGenAI({
+        vertexai: true,
+        project: process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT,
+        location: targetRegion,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+    }
+    return aiClientInstance;
+  }
+
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     return null;
   }
 
-  if (!aiClientInstance) {
+  if (!aiClientInstance || currentClientRegion !== targetRegion) {
+    currentClientRegion = targetRegion;
     aiClientInstance = new GoogleGenAI({
       apiKey,
       httpOptions: {
@@ -36,6 +86,7 @@ export interface FallbackGenerationOptions {
   contents: GenerateContentParameters['contents'];
   config?: GenerateContentParameters['config'];
   mode?: string;
+  region?: string;
 }
 
 /**
@@ -47,6 +98,19 @@ function generateOfflineResponse(
   mode: string = 'reflection'
 ): string {
   const cleanPrompt = userPrompt.trim();
+
+  if (mode === 'mirror') {
+    return (
+      `### 1. The Temporal Echo (Recurring Patterns)\n` +
+      `Your current reflection re-engages a recurring theme: balancing the urge for immediate resolution against the discomfort of ambiguity. You are revisiting an internal demand for absolute certainty before committing to action—a pattern documented across previous turning points.\n\n` +
+      `### 2. Blind Spots & Cognitive Traps\n` +
+      `You are conflating temporary emotional discomfort with a lack of strategic competence. The underlying assumption here is that hesitation signals that something is fundamentally wrong with your path, rather than recognizing that hesitation is an unavoidable friction inherent in genuine growth.\n\n` +
+      `### 3. The Growth Ledger (Then vs. Now)\n` +
+      `Compared to earlier entries where distress often triggered paralysis or impulsive course-correction, today you are actively articulating the tension in writing. You have moved from reactivity to structured witness. The impulse to catastrophize has shifted toward an analytical assessment of what you can control.\n\n` +
+      `### 4. The Forward Catalyst\n` +
+      `What decision are you attempting to solve with more thinking that can only actually be resolved through committed action?`
+    );
+  }
 
   if (mode === 'summary') {
     return (
@@ -102,8 +166,9 @@ function generateOfflineResponse(
  */
 export async function generateContentWithFallback(
   options: FallbackGenerationOptions
-): Promise<{ text: string; modelUsed: string; isFallback?: boolean; notice?: string }> {
-  const ai = getGeminiClient();
+): Promise<{ text: string; modelUsed: string; isFallback?: boolean; notice?: string; region?: string }> {
+  const targetRegion = options.region || process.env.GEMINI_REGION || 'us-central1';
+  const ai = getGeminiClient(targetRegion);
 
   // Extract prompt text if present
   let extractedPrompt = '';
@@ -125,12 +190,14 @@ export async function generateContentWithFallback(
       text: fallbackText,
       modelUsed: 'mindful-engine (API Key Not Configured)',
       isFallback: true,
-      notice: 'GEMINI_API_KEY is not configured. Reflection was processed via the mindful engine and saved to Firestore. Configure your key in Settings > Secrets.',
+      region: targetRegion,
+      notice: `GEMINI_API_KEY is not configured for region [${targetRegion}]. Reflection was processed via the mindful engine and saved to Firestore. Configure your key in Settings > Secrets.`,
     };
   }
 
   let lastError: unknown = null;
   let isApiKeyIssue = false;
+  let isQuotaOrCreditsIssue = false;
 
   for (const model of MODEL_FALLBACK_LADDER) {
     try {
@@ -142,7 +209,7 @@ export async function generateContentWithFallback(
 
       const text = response.text;
       if (text !== undefined && text !== null) {
-        return { text, modelUsed: model };
+        return { text, modelUsed: model, region: targetRegion };
       }
     } catch (err: unknown) {
       lastError = err;
@@ -151,26 +218,45 @@ export async function generateContentWithFallback(
       if (errorMsg.includes('API_KEY_INVALID') || errorMsg.includes('API key not valid') || errorMsg.includes('API_KEY_SERVICE_BLOCKED')) {
         isApiKeyIssue = true;
         console.warn(`[Gemini Auth Notice] API Key is invalid or blocked: ${errorMsg}. Engaging mindful fallback engine...`);
-        break; // Stop attempting other models if the key itself is invalid
+        break;
       }
 
-      console.warn(`[Gemini Fallback] Model "${model}" failed: ${errorMsg}. Checking next in ladder...`);
+      if (
+        errorMsg.includes('429') ||
+        errorMsg.includes('RESOURCE_EXHAUSTED') ||
+        errorMsg.includes('prepayment credits are depleted') ||
+        errorMsg.includes('quota')
+      ) {
+        isQuotaOrCreditsIssue = true;
+        console.warn(`[Gemini Quota Notice] Region [${targetRegion}] returned 429 quota/credits depleted: ${errorMsg}.`);
+      }
+
+      console.warn(`[Gemini Fallback] Model "${model}" in region "${targetRegion}" failed: ${errorMsg}. Checking next in ladder...`);
     }
   }
 
-  // If the API key is invalid or all attempts failed, ensure persistence & user experience don't break
-  if (isApiKeyIssue || lastError) {
-    console.info('[Gemini Fallback] Activating offline mindful reflection to ensure transaction completeness.');
+  // If the API key is invalid, quota is depleted, or all attempts failed, ensure persistence & user experience don't break
+  if (isApiKeyIssue || isQuotaOrCreditsIssue || lastError) {
+    console.info(`[Gemini Fallback] Activating offline mindful reflection for region [${targetRegion}] to ensure transaction completeness.`);
     const fallbackText = generateOfflineResponse(extractedPrompt, options.mode);
+
+    let diagnosticNotice: string;
+    if (isQuotaOrCreditsIssue) {
+      diagnosticNotice = `Gemini API quota/prepayment credits depleted (HTTP 429) for project in region [${targetRegion}]. Your reflection was mindfully structured and saved to Firestore. To enable live Gemini AI models, visit ai.studio/projects to replenish credits or update your key in Settings > Secrets.`;
+    } else if (isApiKeyIssue) {
+      diagnosticNotice = `The configured GEMINI_API_KEY is invalid or expired. Your reflection was answered by the mindful engine and saved securely to Firestore. Update your key in Settings > Secrets to enable live Gemini AI.`;
+    } else {
+      diagnosticNotice = `Live Gemini models were temporarily unreachable in region [${targetRegion}]. Your reflection was saved with the mindful engine. You can switch to another region (e.g., us-central1) or retry.`;
+    }
+
     return {
       text: fallbackText,
       modelUsed: 'mindful-engine (Fallback)',
       isFallback: true,
-      notice: isApiKeyIssue
-        ? 'The configured GEMINI_API_KEY is invalid or expired. Your reflection was answered by the mindful engine and saved securely to Firestore. Update your key in Settings > Secrets to enable live Gemini AI.'
-        : 'Live Gemini models were temporarily unreachable. Your reflection was saved with the mindful engine.',
+      region: targetRegion,
+      notice: diagnosticNotice,
     };
   }
 
-  throw lastError || new Error('All models in the Gemini resilience ladder failed to respond.');
+  throw lastError || new Error(`All models in the Gemini resilience ladder failed to respond in region [${targetRegion}].`);
 }

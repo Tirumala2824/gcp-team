@@ -25,7 +25,7 @@
         "mode": {
           "type": "string",
           "description": "Reflection exploration mode",
-          "enum": ["reflection", "brainstorm", "summary", "journal"]
+          "enum": ["mirror", "reflection", "journal", "summary", "brainstorm"]
         },
         "messages": {
           "type": "array",

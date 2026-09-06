@@ -16,6 +16,7 @@ import {
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType, sanitizePayload } from '@/lib/firebase';
 import { ChatMessage, ReflectionMode } from '@/lib/types';
+import { SUPPORTED_REGIONS } from '@/lib/gemini';
 import {
   BookOpen,
   Sparkles,
@@ -36,7 +37,16 @@ import {
   Loader2,
   Menu,
   X,
+  History,
+  TrendingUp,
+  Zap,
+  Target,
+  GitCompare,
+  RotateCcw,
+  Globe,
+  Activity,
 } from 'lucide-react';
+import { LongitudinalVisualization } from './LongitudinalVisualization';
 
 interface DashboardProps {
   user: User;
@@ -57,17 +67,17 @@ const MODE_CONFIGS: Record<
   ReflectionMode,
   { label: string; icon: React.ComponentType<{ className?: string }>; description: string; placeholder: string }
 > = {
+  mirror: {
+    label: 'Cognitive Mirror',
+    icon: History,
+    description: 'Temporal longitudinal reflection: exposes recurring patterns, blind spots, and personal growth across your archive.',
+    placeholder: 'Write your newest reflection today. The cognitive mirror will compare your thoughts against your historical archive...',
+  },
   reflection: {
     label: 'Deep Reflection',
     icon: Compass,
     description: 'Explore feelings, challenges, and mindful perspectives with Gemini.',
     placeholder: 'What is on your mind today? Share a situation, thought, or feeling...',
-  },
-  brainstorm: {
-    label: 'Creative Brainstorm',
-    icon: Lightbulb,
-    description: 'Generate inventive ideas, angles, and pathways forward.',
-    placeholder: 'What problem or project are you brainstorming? Tell Gemini where you want to go...',
   },
   journal: {
     label: 'Mindful Journal',
@@ -81,13 +91,19 @@ const MODE_CONFIGS: Record<
     description: 'Distill thoughts into core realizations and mindful action anchors.',
     placeholder: 'Paste notes or describe raw thoughts you want synthesized...',
   },
+  brainstorm: {
+    label: 'Creative Brainstorm',
+    icon: Lightbulb,
+    description: 'Generate inventive ideas, angles, and pathways forward.',
+    placeholder: 'What problem or project are you brainstorming? Tell Gemini where you want to go...',
+  },
 };
 
 const PROMPT_STARTERS = [
-  'What brought me a quiet moment of gratitude today?',
-  'A challenge I am facing and how I might reframe it',
-  'Brainstorm 3 fresh perspectives on my current dilemma',
-  'Reflect on where I felt energy versus where I felt drained',
+  'I notice myself hesitating to commit to this next step—wondering if this is my usual avoidance loop',
+  'Reflecting on how I responded to recent setbacks versus how I handled friction in earlier journals',
+  'Feeling imposter syndrome resurface around this milestone; contrast this with my documented track record',
+  'Examine whether my current frustration with work is a genuine shift or the exact same cyclical rut from past entries',
 ];
 
 function createMessageId(prefix: string): string {
@@ -97,10 +113,37 @@ function createMessageId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).substring(2, 9)}`;
 }
 
+function parseMirrorSections(text: string) {
+  if (!text || typeof text !== 'string') return null;
+
+  const hasEcho = /1\.\s*The Temporal Echo/i.test(text);
+  const hasTraps = /2\.\s*Blind Spots/i.test(text);
+  const hasGrowth = /3\.\s*The Growth Ledger/i.test(text);
+  const hasCatalyst = /4\.\s*The Forward Catalyst/i.test(text);
+
+  if (!hasEcho && !hasTraps && !hasGrowth && !hasCatalyst) {
+    return null;
+  }
+
+  const echoMatch = text.match(/(?:###\s*1\.\s*The Temporal Echo[^\n]*|1\.\s*The Temporal Echo[^\n]*)([\s\S]*?)(?=(?:###\s*2\.\s*Blind Spots|2\.\s*Blind Spots|$))/i);
+  const trapsMatch = text.match(/(?:###\s*2\.\s*Blind Spots[^\n]*|2\.\s*Blind Spots[^\n]*)([\s\S]*?)(?=(?:###\s*3\.\s*The Growth Ledger|3\.\s*The Growth Ledger|$))/i);
+  const growthMatch = text.match(/(?:###\s*3\.\s*The Growth Ledger[^\n]*|3\.\s*The Growth Ledger[^\n]*)([\s\S]*?)(?=(?:###\s*4\.\s*The Forward Catalyst|4\.\s*The Forward Catalyst|$))/i);
+  const catalystMatch = text.match(/(?:###\s*4\.\s*The Forward Catalyst[^\n]*|4\.\s*The Forward Catalyst[^\n]*)([\s\S]*)$/i);
+
+  return {
+    echo: echoMatch ? echoMatch[1].trim() : '',
+    traps: trapsMatch ? trapsMatch[1].trim() : '',
+    growth: growthMatch ? growthMatch[1].trim() : '',
+    catalyst: catalystMatch ? catalystMatch[1].trim() : '',
+  };
+}
+
 export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
   const [interactions, setInteractions] = useState<FirestoreInteraction[]>([]);
   const [activeInteractionId, setActiveInteractionId] = useState<string | null>(null);
-  const [activeMode, setActiveMode] = useState<ReflectionMode>('reflection');
+  const [activeMode, setActiveMode] = useState<ReflectionMode>('mirror');
+  const [activeView, setActiveView] = useState<'journal' | 'analytics'>('journal');
+  const [selectedRegion, setSelectedRegion] = useState<string>('us-central1');
   const [inputText, setInputText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -210,6 +253,24 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
       content: m.content,
     }));
 
+    // Extract chronological past entries from Firestore interactions for longitudinal analysis
+    const pastEntries = interactions
+      .filter((item) => item.id !== activeInteractionId)
+      .map((item) => {
+        const userText = item.messages
+          .filter((m) => m.role === 'user')
+          .map((m) => m.content)
+          .join(' ');
+        return {
+          id: item.id,
+          date: formatTimestamp(item.createdAt || item.updatedAt),
+          title: item.title,
+          content: userText.slice(0, 1000),
+          mode: item.mode,
+        };
+      })
+      .slice(0, 15);
+
     try {
       // 1. Send to server-side Gemini API route
       const response = await fetch('/api/gemini/reflect', {
@@ -218,7 +279,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
         body: JSON.stringify({
           prompt: promptToSend,
           mode: activeMode,
+          region: selectedRegion,
           contextMessages,
+          pastEntries,
         }),
       });
 
@@ -343,6 +406,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: activeInteraction.messages,
+          region: selectedRegion,
         }),
       });
 
@@ -438,9 +502,61 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
               </span>
             </div>
           </div>
+
+          {/* Central View Switcher Tabs */}
+          <div id="view-mode-tabs" className="hidden md:flex items-center bg-stone-100 p-1 rounded-xl border border-stone-200 text-xs ml-4">
+            <button
+              id="tab-view-journal"
+              onClick={() => setActiveView('journal')}
+              className={`px-3 py-1 rounded-lg font-medium transition-all flex items-center space-x-1.5 cursor-pointer ${
+                activeView === 'journal'
+                  ? 'bg-white text-stone-900 shadow-2xs font-semibold'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Journal & Mirror</span>
+            </button>
+            <button
+              id="tab-view-analytics"
+              onClick={() => setActiveView('analytics')}
+              className={`px-3 py-1 rounded-lg font-medium transition-all flex items-center space-x-1.5 cursor-pointer ${
+                activeView === 'analytics'
+                  ? 'bg-white text-stone-900 shadow-2xs font-semibold'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+            >
+              <Activity className="w-3.5 h-3.5 text-amber-700" />
+              <span>30-Day Trends</span>
+            </button>
+          </div>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-2 sm:space-x-3">
+          {/* Active Model / Region Selector */}
+          <div
+            id="region-selector-chip"
+            className="flex items-center space-x-1.5 px-2 sm:px-2.5 py-1 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-700 hover:border-stone-300 transition-colors"
+          >
+            <Globe className="w-3.5 h-3.5 text-stone-500 shrink-0" />
+            <label htmlFor="select-region" className="text-[11px] text-stone-500 font-medium hidden lg:inline">
+              Region:
+            </label>
+            <select
+              id="select-region"
+              value={selectedRegion}
+              onChange={(e) => setSelectedRegion(e.target.value)}
+              className="bg-transparent text-[11px] sm:text-xs font-medium text-stone-800 focus:outline-hidden cursor-pointer pr-1"
+              title="Select Google Cloud execution region for Gemini models"
+            >
+              {SUPPORTED_REGIONS.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.id === 'us-central1' ? `${r.id} (US Central - Recommended)` : r.id}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* User profile info */}
           <div id="user-profile-chip" className="flex items-center space-x-2 pl-2 pr-3 py-1 bg-stone-50 border border-stone-200 rounded-full text-xs text-stone-700">
             <div className="w-6 h-6 rounded-full bg-stone-900 text-stone-100 flex items-center justify-center font-semibold text-[10px]">
@@ -473,14 +589,42 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
           }`}
         >
           {/* Action Header */}
-          <div className="p-4 border-b border-stone-200 flex items-center justify-between">
+          <div className="p-4 border-b border-stone-200 space-y-2">
             <button
               id="btn-new-reflection"
-              onClick={handleStartNewSession}
+              onClick={() => {
+                setActiveView('journal');
+                handleStartNewSession();
+              }}
               className="w-full py-2.5 px-4 rounded-xl bg-stone-900 hover:bg-stone-800 active:bg-black text-white text-xs font-medium flex items-center justify-center space-x-2 shadow-xs cursor-pointer transition-all"
             >
               <Plus className="w-4 h-4" />
               <span>New Reflection Session</span>
+            </button>
+
+            <button
+              id="btn-sidebar-view-analytics"
+              onClick={() => {
+                setActiveView('analytics');
+                setSidebarOpen(false);
+              }}
+              className={`w-full py-2 px-3 rounded-xl border text-xs font-medium flex items-center justify-between cursor-pointer transition-all ${
+                activeView === 'analytics'
+                  ? 'bg-stone-900 text-white border-stone-900 shadow-xs'
+                  : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-200'
+              }`}
+            >
+              <div className="flex items-center space-x-2">
+                <Activity className="w-3.5 h-3.5 text-amber-600" />
+                <span>30-Day Trends & Themes</span>
+              </div>
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                  activeView === 'analytics' ? 'bg-stone-800 text-stone-200' : 'bg-stone-100 text-stone-600'
+                }`}
+              >
+                Chart
+              </span>
             </button>
           </div>
 
@@ -514,6 +658,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
                     onClick={() => {
                       setActiveInteractionId(interaction.id);
                       setActiveMode(interaction.mode);
+                      setActiveView('journal');
                       setSidebarOpen(false);
                       setErrorMessage(null);
                     }}
@@ -593,7 +738,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
         )}
 
         {/* Center / Right Stage */}
-        <main id="dashboard-stage" className="flex-1 flex flex-col bg-white overflow-hidden">
+        {activeView === 'analytics' ? (
+          <LongitudinalVisualization
+            interactions={interactions}
+            onSelectInteraction={(id) => {
+              setActiveInteractionId(id);
+              setActiveView('journal');
+            }}
+            onBackToJournal={() => setActiveView('journal')}
+          />
+        ) : (
+          <main id="dashboard-stage" className="flex-1 flex flex-col bg-white overflow-hidden">
           {/* Active Session Header */}
           <div id="session-header" className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center space-x-3">
@@ -612,7 +767,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
 
             {/* Mode Selector Buttons */}
             <div id="mode-selector-group" className="flex items-center space-x-1 bg-stone-200/70 p-1 rounded-xl self-start sm:self-auto overflow-x-auto max-w-full">
-              {(['reflection', 'brainstorm', 'journal', 'summary'] as ReflectionMode[]).map((mode) => {
+              {(['mirror', 'reflection', 'journal', 'summary', 'brainstorm'] as ReflectionMode[]).map((mode) => {
                 const isCurrent = activeMode === mode;
                 const Icon = MODE_CONFIGS[mode].icon;
                 return (
@@ -633,6 +788,29 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
               })}
             </div>
           </div>
+
+          {/* Temporal Archive Context Bar */}
+          {activeMode === 'mirror' && (
+            <div
+              id="mirror-archive-context-bar"
+              className="px-4 sm:px-6 py-2.5 bg-stone-100/70 border-b border-stone-200 text-xs flex flex-wrap items-center justify-between gap-2"
+            >
+              <div className="flex items-center space-x-2 text-stone-700">
+                <History className="w-4 h-4 text-stone-900 shrink-0" />
+                <span className="font-semibold text-stone-900">Temporal Archive Context:</span>
+                <span>
+                  {interactions.length > 0
+                    ? `${interactions.length} historical ${interactions.length === 1 ? 'reflection' : 'reflections'} chronologically indexed for pattern detection`
+                    : 'Archive is empty — this reflection will establish your initial Baseline Anchor #1'}
+                </span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <span className="inline-flex items-center text-[11px] bg-white border border-stone-200 text-stone-800 px-2.5 py-0.5 rounded-full font-medium shadow-2xs">
+                  Longitudinal Cognitive Mirror Active
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Error Banner with Retry Save Option */}
           {errorMessage && (
@@ -668,14 +846,28 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
             >
               <div className="flex items-start space-x-2.5">
                 <Sparkles className="w-4 h-4 text-stone-600 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold text-stone-900">Engine Notice:</span> {apiNotice}
+                <div className="space-y-1">
+                  <div>
+                    <span className="font-semibold text-stone-900">Engine Notice:</span> {apiNotice}
+                  </div>
+                  {selectedRegion !== 'us-central1' && (
+                    <div className="pt-0.5 flex items-center space-x-2">
+                      <span className="text-[11px] text-stone-500">Currently targeting: {selectedRegion}.</span>
+                      <button
+                        id="btn-switch-to-recommended-region"
+                        onClick={() => setSelectedRegion('us-central1')}
+                        className="text-[11px] font-semibold text-stone-900 underline hover:text-stone-700 cursor-pointer"
+                      >
+                        Switch to us-central1 (Recommended)
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
               <button
                 id="btn-dismiss-notice"
                 onClick={() => setApiNotice(null)}
-                className="ml-3 p-0.5 text-stone-400 hover:text-stone-700 text-xs cursor-pointer"
+                className="ml-3 p-0.5 text-stone-400 hover:text-stone-700 text-xs cursor-pointer shrink-0"
                 title="Dismiss"
               >
                 ✕
@@ -761,15 +953,76 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
                       )}
                     </div>
 
-                    <div
-                      className={`max-w-2xl px-4 py-3 rounded-2xl text-xs sm:text-sm leading-relaxed whitespace-pre-wrap shadow-xs ${
-                        isUser
-                          ? 'bg-stone-900 text-stone-50 rounded-br-xs'
-                          : 'bg-stone-50 border border-stone-200/90 text-stone-800 rounded-bl-xs font-serif'
-                      }`}
-                    >
-                      {message.content}
-                    </div>
+                    {(() => {
+                      if (!isUser) {
+                        const parsed = parseMirrorSections(message.content);
+                        if (parsed) {
+                          return (
+                            <div className="w-full max-w-2xl space-y-3">
+                              {parsed.echo && (
+                                <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 shadow-2xs space-y-1.5">
+                                  <div className="flex items-center space-x-2 text-stone-900 font-semibold text-xs uppercase tracking-wider">
+                                    <RotateCcw className="w-3.5 h-3.5 text-stone-700" />
+                                    <span>1. The Temporal Echo (Recurring Patterns)</span>
+                                  </div>
+                                  <div className="text-xs sm:text-sm text-stone-800 leading-relaxed font-serif whitespace-pre-wrap">
+                                    {parsed.echo}
+                                  </div>
+                                </div>
+                              )}
+
+                              {parsed.traps && (
+                                <div className="p-4 rounded-xl bg-amber-50/50 border border-amber-200 shadow-2xs space-y-1.5">
+                                  <div className="flex items-center space-x-2 text-amber-900 font-semibold text-xs uppercase tracking-wider">
+                                    <Target className="w-3.5 h-3.5 text-amber-700" />
+                                    <span>2. Blind Spots &amp; Cognitive Traps</span>
+                                  </div>
+                                  <div className="text-xs sm:text-sm text-stone-800 leading-relaxed font-serif whitespace-pre-wrap">
+                                    {parsed.traps}
+                                  </div>
+                                </div>
+                              )}
+
+                              {parsed.growth && (
+                                <div className="p-4 rounded-xl bg-emerald-50/50 border border-emerald-200 shadow-2xs space-y-1.5">
+                                  <div className="flex items-center space-x-2 text-emerald-900 font-semibold text-xs uppercase tracking-wider">
+                                    <TrendingUp className="w-3.5 h-3.5 text-emerald-700" />
+                                    <span>3. The Growth Ledger (Then vs. Now)</span>
+                                  </div>
+                                  <div className="text-xs sm:text-sm text-stone-800 leading-relaxed font-serif whitespace-pre-wrap">
+                                    {parsed.growth}
+                                  </div>
+                                </div>
+                              )}
+
+                              {parsed.catalyst && (
+                                <div className="p-4 sm:p-5 rounded-xl bg-stone-900 text-stone-50 shadow-xs space-y-2">
+                                  <div className="flex items-center space-x-2 text-amber-300 font-semibold text-xs uppercase tracking-wider">
+                                    <Zap className="w-3.5 h-3.5 text-amber-300" />
+                                    <span>4. The Forward Catalyst</span>
+                                  </div>
+                                  <div className="text-xs sm:text-sm text-stone-100 font-medium font-serif leading-relaxed whitespace-pre-wrap italic">
+                                    {parsed.catalyst}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                      }
+
+                      return (
+                        <div
+                          className={`max-w-2xl px-4 py-3 rounded-2xl text-xs sm:text-sm leading-relaxed whitespace-pre-wrap shadow-xs ${
+                            isUser
+                              ? 'bg-stone-900 text-stone-50 rounded-br-xs'
+                              : 'bg-stone-50 border border-stone-200/90 text-stone-800 rounded-bl-xs font-serif'
+                          }`}
+                        >
+                          {message.content}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })
@@ -850,6 +1103,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user }) => {
             </form>
           </div>
         </main>
+      )}
       </div>
     </div>
   );
